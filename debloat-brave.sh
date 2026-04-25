@@ -8,7 +8,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-readonly VERSION="1.0.0"
+readonly VERSION="1.1.0"
 readonly BRAVE_BUNDLE="com.brave.Browser"
 readonly MANAGED_PLIST="/Library/Managed Preferences/${BRAVE_BUNDLE}.plist"
 readonly BRAVE_APP="/Applications/Brave Browser.app"
@@ -93,10 +93,53 @@ if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
   C_BLUE=$(tput setaf 4)
   C_MAGENTA=$(tput setaf 5)
   C_CYAN=$(tput setaf 6)
+  C_REV=$(tput rev)
   C_RESET=$(tput sgr0)
 else
-  C_BOLD="" C_DIM="" C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_MAGENTA="" C_CYAN="" C_RESET=""
+  C_BOLD="" C_DIM="" C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_MAGENTA="" C_CYAN="" C_REV="" C_RESET=""
 fi
+
+# Theme aliases
+C_ACCENT="$C_CYAN"
+C_HEADING="$C_MAGENTA"
+C_OK="$C_GREEN"
+C_WARN="$C_YELLOW"
+C_DANGER="$C_RED"
+
+# ---------------------------------------------------------------------------
+# Terminal sizing
+# ---------------------------------------------------------------------------
+TERM_COLS=80
+update_term_size() {
+  local c
+  c=$(tput cols 2>/dev/null || echo 80)
+  (( c < 60 )) && c=60
+  (( c > 100 )) && c=100
+  TERM_COLS=$c
+}
+update_term_size
+
+# Repeat a single character N times. Usage: rep '─' 30
+rep() {
+  local ch=$1 n=$2 out=""
+  local i
+  for ((i=0; i<n; i++)); do out+="$ch"; done
+  printf '%s' "$out"
+}
+
+# Pad string with spaces to reach target visible width
+pad_right() {
+  local s=$1 width=$2
+  local len=${#s}
+  local diff=$((width - len))
+  (( diff < 0 )) && diff=0
+  printf '%s%*s' "$s" "$diff" ''
+}
+
+# Move cursor home without clearing (reduces flicker vs `clear`)
+cursor_home() { printf '\033[H'; }
+clear_below()  { printf '\033[J'; }
+clear_eol()    { printf '\033[K'; }
 
 # ---------------------------------------------------------------------------
 # Terminal handling
@@ -324,8 +367,19 @@ read_key() {
     n|N)            KEY=N ;;
     q|Q)            KEY=Q ;;
     y|Y)            KEY=Y ;;
+    '?')            KEY=HELP ;;
+    '/')            KEY=SLASH ;;
     *)              KEY="OTHER:$first" ;;
   esac
+}
+
+# Render a footer hint bar (single line) at the bottom of a frame.
+draw_hint_bar() {
+  local hints=$1
+  local sep
+  sep=$(rep '─' "$TERM_COLS")
+  printf '\n  %s%s%s\n' "$C_DIM" "$sep" "$C_RESET"
+  printf '  %s%s%s\n' "$C_DIM" "$hints" "$C_RESET"
 }
 
 # Generic arrow-driven menu. Sets ARROW_RESULT to selected index or -1 (quit).
@@ -334,18 +388,21 @@ arrow_select() {
   local title=$1; shift
   local -a items=("$@")
   local n=${#items[@]} cursor=0 i
+  local row_w=$((TERM_COLS - 6))
   tput civis 2>/dev/null || true
   while true; do
     draw_header
-    printf '\n  %s%s%s\n\n' "$C_BOLD" "$title" "$C_RESET"
+    printf '\n  %s%s%s%s\n\n' "$C_BOLD" "$C_HEADING" "$title" "$C_RESET"
     for ((i=0; i<n; i++)); do
+      local content
+      content=$(pad_right "  ${items[$i]}" "$row_w")
       if ((i == cursor)); then
-        printf '  %s▶  %s%s%s\n' "$C_CYAN" "$C_BOLD" "${items[$i]}" "$C_RESET"
+        printf '  %s▌%s%s%s%s\n' "$C_ACCENT" "$C_RESET" "$C_REV" "$content" "$C_RESET"
       else
-        printf '     %s\n' "${items[$i]}"
+        printf '   %s\n' "${items[$i]}"
       fi
     done
-    printf '\n  %s↑/↓ or j/k · enter to select · q to quit%s\n' "$C_DIM" "$C_RESET"
+    draw_hint_bar "  ↑↓ / jk move    ⏎ select    q quit"
     read_key
     case "$KEY" in
       UP)    cursor=$(( cursor > 0 ? cursor - 1 : n - 1 )) ;;
@@ -360,19 +417,143 @@ arrow_select() {
 # Header / banner
 # ---------------------------------------------------------------------------
 draw_header() {
-  clear_screen
-  local mode_label="user-level"
-  $SYSTEM_MODE && mode_label="${C_RED}system-managed${C_RESET}"
-  $DRY_RUN && mode_label="$mode_label ${C_YELLOW}(dry-run)${C_RESET}"
-  cat <<EOF
-${C_MAGENTA}${C_BOLD}
-   ╔═══════════════════════════════════════════════╗
-   ║         debloat-brave  ·  v${VERSION}              ║
-   ║      Tame Brave Browser on macOS              ║
-   ╚═══════════════════════════════════════════════╝${C_RESET}
+  update_term_size
+  cursor_home
+  clear_below
 
-${C_DIM}Brave version:${C_RESET} $(brave_version)   ${C_DIM}Mode:${C_RESET} ${mode_label}
+  local inner=$((TERM_COLS - 4))
+  local title="debloat-brave  ${VERSION}"
+  local bv mode
+  bv=$(brave_version)
+  if $SYSTEM_MODE; then
+    mode="system"
+  else
+    mode="user"
+  fi
+  $DRY_RUN && mode="${mode}·dry-run"
+  local right="Brave ${bv}   ${mode}"
+  local left_padded
+  left_padded=$(pad_right "$title" $((inner - ${#right})))
+
+  printf '\n'
+  printf '  %s%s╭%s╮%s\n' "$C_HEADING" "$C_BOLD" "$(rep '─' $((inner+2)))" "$C_RESET"
+  printf '  %s%s│%s %s%s %s│%s\n' \
+    "$C_HEADING" "$C_BOLD" "$C_RESET" \
+    "${C_BOLD}${left_padded}${C_RESET}${C_DIM}${right}${C_RESET}" \
+    "" "$C_HEADING$C_BOLD" "$C_RESET"
+  printf '  %s%s╰%s╯%s\n' "$C_HEADING" "$C_BOLD" "$(rep '─' $((inner+2)))" "$C_RESET"
+}
+
+# ---------------------------------------------------------------------------
+# Help overlay, spinner, toast
+# ---------------------------------------------------------------------------
+show_help() {
+  draw_header
+  cat <<EOF
+
+  ${C_BOLD}${C_HEADING}Keyboard shortcuts${C_RESET}
+
+    ${C_ACCENT}↑ ↓${C_RESET} or ${C_ACCENT}k j${C_RESET}    Move cursor up / down
+    ${C_ACCENT}space${C_RESET}          Toggle highlighted row
+    ${C_ACCENT}a${C_RESET}              Select all
+    ${C_ACCENT}n${C_RESET}              Select none
+    ${C_ACCENT}enter${C_RESET}          Apply / confirm
+    ${C_ACCENT}?${C_RESET}              Show this help
+    ${C_ACCENT}q${C_RESET} or ${C_ACCENT}esc${C_RESET}      Cancel / back
+
+  ${C_BOLD}${C_HEADING}Status icons${C_RESET}
+
+    ${C_OK}✓${C_RESET}              Set to debloat value
+    ${C_DIM}○${C_RESET}              Brave default (key unset)
+    ${C_DANGER}!${C_RESET}              Foreign value (something else changed it)
+
 EOF
+  draw_hint_bar "  press any key to return"
+  read_key
+}
+
+# Animated braille spinner that runs apply across all categories.
+# Usage: spinner_apply_all
+spinner_apply_all() {
+  if $DRY_RUN; then
+    apply_all_recommended
+    return 0
+  fi
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local i=0 row arr_name
+  tput civis 2>/dev/null || true
+  printf '\n'
+  for arr_name in "${ALL_CATEGORIES[@]}"; do
+    load_rows "$arr_name"
+    for row in "${__ROWS[@]}"; do
+      parse_row "$row"
+      printf '\r  %s%s%s  applying  %s%s%s' \
+        "$C_ACCENT" "${frames[$((i % 10))]}" "$C_RESET" \
+        "$C_DIM" "$__key" "$C_RESET"
+      clear_eol
+      apply_setting "$__key" "$__type" "$__desired"
+      i=$((i + 1))
+    done
+  done
+  tput cnorm 2>/dev/null || true
+  printf '\r'; clear_eol
+}
+
+# Spinner across an explicit list of rows + selection map.
+# Usage: spinner_apply_selected entries_var is_row_var selected_var
+spinner_apply_selected() {
+  if $DRY_RUN; then
+    local i row_data
+    eval "local n=\${#$1[@]}"
+    for ((i=0; i<n; i++)); do
+      eval "local is_r=\${$2[$i]}"
+      [[ "$is_r" != "1" ]] && continue
+      eval "row_data=\${$1[$i]#row|}"
+      parse_row "$row_data"
+      eval "local sel=\${$3[$i]}"
+      if [[ "$sel" == "1" ]]; then
+        apply_setting "$__key" "$__type" "$__desired"
+      else
+        revert_setting "$__key"
+      fi
+    done
+    return 0
+  fi
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local i row_data idx=0
+  eval "local n=\${#$1[@]}"
+  tput civis 2>/dev/null || true
+  printf '\n'
+  for ((i=0; i<n; i++)); do
+    eval "local is_r=\${$2[$i]}"
+    [[ "$is_r" != "1" ]] && continue
+    eval "row_data=\${$1[$i]#row|}"
+    parse_row "$row_data"
+    eval "local sel=\${$3[$i]}"
+    local action="applying"
+    [[ "$sel" != "1" ]] && action="reverting"
+    printf '\r  %s%s%s  %s  %s%s%s' \
+      "$C_ACCENT" "${frames[$((idx % 10))]}" "$C_RESET" \
+      "$action" "$C_DIM" "$__key" "$C_RESET"
+    clear_eol
+    if [[ "$sel" == "1" ]]; then
+      apply_setting "$__key" "$__type" "$__desired"
+    else
+      revert_setting "$__key"
+    fi
+    idx=$((idx + 1))
+  done
+  tput cnorm 2>/dev/null || true
+  printf '\r'; clear_eol
+}
+
+toast_ok() {
+  local msg=$1
+  printf '\n  %s%s ✓ %s%s\n' "$C_BOLD" "$C_OK" "$msg" "$C_RESET"
+}
+toast_warn() {
+  local msg=$1
+  printf '\n  %s%s ! %s%s\n' "$C_BOLD" "$C_WARN" "$msg" "$C_RESET"
 }
 
 # ---------------------------------------------------------------------------
@@ -420,62 +601,93 @@ guard_brave_running() {
 # ---------------------------------------------------------------------------
 mode_quick() {
   draw_header
-  printf '\n  %sQuick debloat will apply the recommended preset to ALL %d keys.%s\n' \
-    "$C_BOLD" "$(count_all_keys)" "$C_RESET"
+  printf '\n  %s%sQuick debloat%s   apply recommended preset to all %d keys\n' \
+    "$C_BOLD" "$C_HEADING" "$C_RESET" "$(count_all_keys)"
   if ! $ASSUME_YES; then
     printf '\n  Proceed? [y/N] '
     local a; read -r a
-    [[ "$a" =~ ^[yY]$ ]] || { log_info "Cancelled."; return 0; }
+    [[ "$a" =~ ^[yY]$ ]] || { toast_warn "Cancelled."; return 0; }
   fi
   guard_brave_running
   backup_current
   ensure_managed_plist
-  log_info "Applying preset..."
-  apply_all_recommended
+  spinner_apply_all
   flush_prefs_cache
-  log_ok "Done. Relaunch Brave for changes to take effect."
+  toast_ok "Applied $(count_all_keys) keys. Relaunch Brave to see changes."
 }
 
 mode_view() {
   draw_header
-  printf '\n'
-  local i=0 row arr_name
+  local i=0 row arr_name set_count=0 total=0
+  # First pass: count
+  for arr_name in "${ALL_CATEGORIES[@]}"; do
+    load_rows "$arr_name"
+    for row in "${__ROWS[@]}"; do
+      parse_row "$row"
+      local s
+      s=$(setting_state "$__key" "$__type" "$__desired")
+      [[ "$s" == "set" ]] && set_count=$((set_count + 1))
+      total=$((total + 1))
+    done
+  done
+  printf '\n  %s%sCurrent state%s   %s%d of %d debloated%s\n' \
+    "$C_BOLD" "$C_HEADING" "$C_RESET" "$C_ACCENT" "$set_count" "$total" "$C_RESET"
+
+  i=0
   for arr_name in "${ALL_CATEGORIES[@]}"; do
     local title=${ALL_TITLES[$i]}
-    printf '  %s%s%s\n' "$C_BOLD" "$title" "$C_RESET"
+    printf '\n  %s▎ %s%s%s\n' "$C_HEADING" "$C_BOLD" "$title" "$C_RESET"
     load_rows "$arr_name"
     for row in "${__ROWS[@]}"; do
       parse_row "$row"
       local state icon
       state=$(setting_state "$__key" "$__type" "$__desired")
       case "$state" in
-        set)     icon="${C_GREEN}[x]${C_RESET}" ;;
-        default) icon="${C_DIM}[ ]${C_RESET}" ;;
-        foreign) icon="${C_RED}[!]${C_RESET}" ;;
+        set)     icon="${C_OK}✓${C_RESET}" ;;
+        default) icon="${C_DIM}○${C_RESET}" ;;
+        foreign) icon="${C_DANGER}!${C_RESET}" ;;
       esac
-      printf '    %s %s %s%s%s\n' "$icon" "$__label" "$C_DIM" "($__key)" "$C_RESET"
+      printf '    %s  %s   %s%s%s\n' "$icon" "$__label" "$C_DIM" "$__key" "$C_RESET"
     done
-    printf '\n'
     ((i++))
   done
-  printf '  %sLegend:%s [x] debloat-applied  [ ] Brave default  [!] non-default foreign value\n' \
-    "$C_DIM" "$C_RESET"
+  draw_hint_bar "  ${C_OK}✓${C_DIM} debloat-applied   ${C_DIM}○ Brave default   ${C_DANGER}!${C_DIM} foreign value"
 }
 
 mode_reset() {
   draw_header
-  printf '\n  %sReset will remove ALL keys this tool manages (restores Brave defaults).%s\n' \
-    "$C_BOLD" "$C_RESET"
+  printf '\n  %s%sReset all%s   restore Brave defaults (only keys we manage)\n' \
+    "$C_BOLD" "$C_HEADING" "$C_RESET"
   if ! $ASSUME_YES; then
     printf '\n  Proceed? [y/N] '
     local a; read -r a
-    [[ "$a" =~ ^[yY]$ ]] || { log_info "Cancelled."; return 0; }
+    [[ "$a" =~ ^[yY]$ ]] || { toast_warn "Cancelled."; return 0; }
   fi
   guard_brave_running
-  log_info "Resetting..."
-  reset_all
+  if $DRY_RUN; then
+    reset_all
+  else
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local i=0 row arr_name
+    tput civis 2>/dev/null || true
+    printf '\n'
+    for arr_name in "${ALL_CATEGORIES[@]}"; do
+      load_rows "$arr_name"
+      for row in "${__ROWS[@]}"; do
+        parse_row "$row"
+        printf '\r  %s%s%s  reverting  %s%s%s' \
+          "$C_ACCENT" "${frames[$((i % 10))]}" "$C_RESET" \
+          "$C_DIM" "$__key" "$C_RESET"
+        clear_eol
+        revert_setting "$__key"
+        i=$((i + 1))
+      done
+    done
+    tput cnorm 2>/dev/null || true
+    printf '\r'; clear_eol
+  fi
   flush_prefs_cache
-  log_ok "Done. Relaunch Brave."
+  toast_ok "Reset complete. Relaunch Brave."
 }
 
 mode_custom() {
@@ -500,7 +712,7 @@ flat_picker() {
   local -a entries     # "header|Title" or "row|<row-data>"
   local -a is_row      # 1 if selectable row, 0 if header
   local -a selected    # 0/1 per entry (only meaningful for rows)
-  local i j cat_idx=0 arr_name title row state
+  local i j cat_idx=0 arr_name title row state row_total=0
 
   # Build flat list
   for arr_name in "${ALL_CATEGORIES[@]}"; do
@@ -512,6 +724,7 @@ flat_picker() {
     for row in "${__ROWS[@]}"; do
       entries+=( "row|${row}" )
       is_row+=( 1 )
+      row_total=$((row_total + 1))
       parse_row "$row"
       state=$(setting_state "$__key" "$__type" "$__desired")
       if [[ "$state" == "set" ]]; then
@@ -532,32 +745,54 @@ flat_picker() {
   tput civis 2>/dev/null || true
   while true; do
     draw_header
-    printf '\n  %sCustomize%s   %s↑/↓ or j/k move · space toggle · a all · n none · enter apply · q cancel%s\n' \
-      "$C_BOLD" "$C_RESET" "$C_DIM" "$C_RESET"
+
+    # Count current selections
+    local sel_count=0
+    for ((i=0; i<n; i++)); do
+      [[ "${is_row[$i]}" == "1" && "${selected[$i]}" == "1" ]] && sel_count=$((sel_count + 1))
+    done
+
+    local title_text="Customize"
+    local counter="${sel_count} of ${row_total} selected"
+    local left_w=$((TERM_COLS - ${#counter} - 4))
+    printf '\n  %s%s%s%s%s%s%s\n' \
+      "$C_BOLD" "$C_HEADING" "$(pad_right "$title_text" "$left_w")" "$C_RESET" \
+      "$C_ACCENT" "$counter" "$C_RESET"
 
     for ((i=0; i<n; i++)); do
       local entry=${entries[$i]}
       if [[ "${is_row[$i]}" == "0" ]]; then
         local hdr=${entry#header|}
-        printf '\n  %s%s▎ %s%s\n' "$C_BOLD" "$C_MAGENTA" "$hdr" "$C_RESET"
+        printf '\n  %s▎ %s%s%s\n' "$C_HEADING" "$C_BOLD" "$hdr" "$C_RESET"
       else
         local row_data=${entry#row|}
         parse_row "$row_data"
-        local mark="[ ]" color=$C_DIM
+        local check="○" check_color=$C_DIM
         if [[ "${selected[$i]}" == "1" ]]; then
-          mark="[x]"; color=$C_GREEN
+          check="✓"; check_color=$C_OK
         fi
-        local cur_state hint=""
+        local cur_state foreign=""
         cur_state=$(setting_state "$__key" "$__type" "$__desired")
-        [[ "$cur_state" == "foreign" ]] && hint="  ${C_RED}!foreign${C_RESET}"
+        [[ "$cur_state" == "foreign" ]] && foreign=" ⚠"
+
         if (( i == cursor )); then
-          printf '  %s▶%s %s%s%s  %s%s\n' "$C_CYAN" "$C_RESET" "$color" "$mark" "$C_RESET" "$__label" "$hint"
+          # Full-width highlight bar with reverse video
+          local content="  ${check}  ${__label}${foreign}"
+          local pad_w=$((TERM_COLS - 4))
+          local padded
+          padded=$(pad_right "$content" "$pad_w")
+          printf '  %s▌%s%s%s%s\n' "$C_ACCENT" "$C_RESET" "$C_REV" "$padded" "$C_RESET"
         else
-          printf '    %s%s%s  %s%s\n' "$color" "$mark" "$C_RESET" "$__label" "$hint"
+          if [[ -n "$foreign" ]]; then
+            printf '    %s%s%s  %s  %s%s%s\n' "$check_color" "$check" "$C_RESET" "$__label" "$C_DANGER" "$foreign" "$C_RESET"
+          else
+            printf '    %s%s%s  %s\n' "$check_color" "$check" "$C_RESET" "$__label"
+          fi
         fi
       fi
     done
 
+    draw_hint_bar "  ↑↓/jk move    ⎵ toggle    a all    n none    ? help    ⏎ apply    q cancel"
     read_key
     case "$KEY" in
       UP)
@@ -601,29 +836,22 @@ flat_picker() {
           [[ "${is_row[$i]}" == "1" ]] && selected[$i]=0
         done
         ;;
+      HELP)
+        show_help
+        ;;
       ENTER)
         tput cnorm 2>/dev/null || true
         guard_brave_running
         backup_current
         ensure_managed_plist
-        for ((i=0; i<n; i++)); do
-          if [[ "${is_row[$i]}" == "1" ]]; then
-            local row_data=${entries[$i]#row|}
-            parse_row "$row_data"
-            if [[ "${selected[$i]}" == "1" ]]; then
-              apply_setting "$__key" "$__type" "$__desired"
-            else
-              revert_setting "$__key"
-            fi
-          fi
-        done
+        spinner_apply_selected entries is_row selected
         flush_prefs_cache
-        log_ok "Applied. Relaunch Brave for changes to take effect."
+        toast_ok "Applied ${sel_count} of ${row_total}. Relaunch Brave."
         return 0
         ;;
       Q|ESC)
         tput cnorm 2>/dev/null || true
-        log_info "Cancelled — no changes made."
+        toast_warn "Cancelled. No changes made."
         return 0
         ;;
     esac
