@@ -18,8 +18,10 @@ err()  { printf '%s✗%s %s\n' "$c_red" "$c_reset" "$*" >&2; }
 [[ "$(uname -s)" == "Darwin" ]] || { err "macOS only."; exit 1; }
 
 if [[ -x "$DEST" ]]; then
-  info "Restoring Brave defaults via $DEST --reset --yes"
+  info "Restoring Brave user defaults via $DEST --reset --yes"
   "$DEST" --reset --yes || warn "Reset reported errors; continuing removal."
+  info "Restoring Brave managed policies via $DEST --system --reset --yes"
+  "$DEST" --system --reset --yes || warn "System reset reported errors; continuing removal."
 else
   warn "$DEST not found; skipping reset."
 fi

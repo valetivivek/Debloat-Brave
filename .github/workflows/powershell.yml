@@ -1,0 +1,25 @@
+name: powershell
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse PowerShell script
+        shell: pwsh
+        run: |
+          $null = [scriptblock]::Create((Get-Content -Raw ./debloat-brave.ps1))
+      - name: Run dry-run smoke checks
+        shell: pwsh
+        run: |
+          ./debloat-brave.ps1 -Version
+          ./debloat-brave.ps1 -Help
+          ./debloat-brave.ps1 -DryRun -Quick -Yes
+          ./debloat-brave.ps1 -DryRun -Reset -Yes
+          ./debloat-brave.ps1 -View
